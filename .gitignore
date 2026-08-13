@@ -13,3 +13,6 @@ dist/
 
 # discovery cache
 host/.cube_cache.json
+
+# portable bundle output
+dist/

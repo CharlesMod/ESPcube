@@ -10,9 +10,15 @@ import pathlib
 import struct
 import zlib
 
-OUT = pathlib.Path(__file__).resolve().parent.parent / "windows" / "meetmaster.ico"
+OUTDIR = pathlib.Path(__file__).resolve().parent.parent / "windows"
 SIZES = (16, 24, 32, 48, 64, 128, 256)
-FILL = (29, 157, 63)        # the same green the cube rests at
+# One icon per status color: green free, red on a call, grey unreachable.
+VARIANTS = {
+    "meetmaster.ico": (29, 157, 63),
+    "meetmaster_red.ico": (216, 38, 43),
+    "meetmaster_grey.ico": (120, 124, 130),
+}
+FILL = (29, 157, 63)        # set per-variant in main()
 EDGE = (255, 255, 255)
 SS = 4                      # supersampling factor for smooth corners
 
@@ -89,7 +95,7 @@ def png_bytes(rows, size):
             + chunk(b"IEND", b""))
 
 
-def main():
+def build_one(out_path):
     images = [(s, png_bytes(rounded_rect_rgba(s), s)) for s in SIZES]
 
     header = struct.pack("<HHH", 0, 1, len(images))
@@ -102,10 +108,17 @@ def main():
         offset += len(data)
         blobs += data
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_bytes(header + entries + blobs)
-    print(f"wrote {OUT.relative_to(OUT.parent.parent)} "
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(header + entries + blobs)
+    print(f"wrote {out_path.name} "
           f"({len(header + entries + blobs):,} bytes, sizes {list(SIZES)})")
+
+
+def main():
+    global FILL
+    for name, fill in VARIANTS.items():
+        FILL = fill
+        build_one(OUTDIR / name)
 
 
 if __name__ == "__main__":
