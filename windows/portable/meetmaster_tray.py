@@ -393,6 +393,7 @@ def _wnd_proc(h, msg, wparam, lparam):
         user32.DestroyWindow(h)
         return 0
     if msg == WM_DESTROY:
+        log("WM_DESTROY: removing tray icon and quitting")
         stop_event.set()
         shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
         user32.PostQuitMessage(0)
@@ -454,7 +455,14 @@ def main():
     threading.Thread(target=watcher, daemon=True).start()
 
     msg = wintypes.MSG()
-    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+    while True:
+        ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+        if ret <= 0:
+            # 0 = WM_QUIT (normal exit), -1 = error. Either way, say so —
+            # a silent process exit is undiagnosable from the outside.
+            log(f"message loop exited (GetMessageW returned {ret}, "
+                f"err={ctypes.get_last_error()})")
+            break
         user32.TranslateMessage(ctypes.byref(msg))
         user32.DispatchMessageW(ctypes.byref(msg))
 

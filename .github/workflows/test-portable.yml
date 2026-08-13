@@ -49,18 +49,19 @@ jobs:
           Start-Process python -ArgumentList "tests/fake_cube.py","8765","$env:RUNNER_TEMP\cube_rx.txt" -WindowStyle Hidden
           Start-Sleep 2
 
-      - name: Run the real installer (the double-click path)
-        shell: cmd
+      # Install + verify happen in ONE step: the runner's job object may
+      # reap a step's child processes at the step boundary (which never
+      # happens on a real desktop), so liveness must be asserted in-step.
+      - name: Run the real installer and verify (single step)
+        shell: pwsh
         env:
           MEETMASTER_CI: '1'
-        run: call "stage\MeetMaster\Install MeetMaster.bat"
-
-      - name: Assert app is up, spoke to the cube, and registered auto-start
-        shell: pwsh
         run: |
+          cmd /c "call ""stage\MeetMaster\Install MeetMaster.bat"""
+          if ($LASTEXITCODE -ne 0) { throw "installer exited $LASTEXITCODE" }
           $log = "$env:APPDATA\MeetMaster\meetmaster.log"
           $rx  = "$env:RUNNER_TEMP\cube_rx.txt"
-          $deadline = (Get-Date).AddSeconds(45)
+          $deadline = (Get-Date).AddSeconds(40)
           while ((Get-Date) -lt $deadline) {
             $loopOk = (Test-Path $log) -and (Select-String -Path $log -Pattern 'entering message loop' -Quiet)
             $cmdOk  = (Test-Path $rx) -and ((Get-Content $rx -ErrorAction SilentlyContinue) -match '^citoken:[GR]$')
@@ -76,13 +77,23 @@ jobs:
           $run = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name MeetMaster -ErrorAction SilentlyContinue
           if (-not $run) { throw 'auto-start registry entry missing' }
           Write-Host "auto-start: $($run.MeetMaster)"
+          # Same-step liveness: if it's dead HERE it died by itself — fatal.
           $proc = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*meetmaster_tray*' }
-          if (-not $proc) { throw 'pythonw process not running' }
-          Write-Host "process: $($proc.ProcessId)"
+          if (-not $proc) { throw 'pythonw process not running within the install step' }
+          Write-Host "process alive in-step: $($proc.ProcessId)"
 
+      # Relaunch inside this step (Start-Process survives boundaries) so
+      # the broadcast test has a live instance regardless of runner reaping.
       - name: Assert the upgrade quit-broadcast is honored
         shell: pwsh
         run: |
+          $exe = "$env:LOCALAPPDATA\Programs\MeetMaster\python\pythonw.exe"
+          $app = "$env:LOCALAPPDATA\Programs\MeetMaster\app\meetmaster_tray.py"
+          Start-Process -FilePath $exe -ArgumentList "`"$app`""
+          Start-Sleep 5
+          $p = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*meetmaster_tray*' }
+          if (-not $p) { throw 'app did not start for the broadcast test' }
+          Write-Host "instance up: $($p.ProcessId)"
           python tests/broadcast_quit.py
           $deadline = (Get-Date).AddSeconds(12)
           do {
@@ -91,7 +102,7 @@ jobs:
           } while ($p -and (Get-Date) -lt $deadline)
           if ($p) { throw 'app ignored the quit broadcast' }
           Write-Host "app exited cleanly on broadcast"
-          Get-Content "$env:APPDATA\MeetMaster\meetmaster.log" | Select-Object -Last 6
+          Get-Content "$env:APPDATA\MeetMaster\meetmaster.log" | Select-Object -Last 8
 
       - name: Run the real uninstaller and assert cleanup
         shell: cmd
