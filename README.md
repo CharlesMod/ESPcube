@@ -126,9 +126,32 @@ launchd agent (macOS), or a systemd user service / autostart entry (Linux).
 
 ## Controller app
 
-Open `host/cube_control.html` in any browser — desktop or phone. Colors,
-brightness, effects, and a raw-IR box. Enter the cube's IP and token once;
-they're kept in that browser's localStorage, never in the repo.
+**Just browse to the cube** — `http://<cube-ip>/` serves the control panel
+straight from the firmware. Colors, brightness, effects, and a raw-IR box,
+on desktop or phone.
+
+Enter the token once; the browser keeps it in localStorage. It is
+deliberately **not** baked into the firmware image, so serving the page to
+your LAN doesn't hand out the ability to drive the cube. The host field
+prefills itself when the cube serves the page.
+
+The same file lives at `host/cube_control.html` if you'd rather open it
+from disk. It's the single source of truth — after editing it, run
+`python3 tools/embed_html.py` to regenerate `firmware/ESPcube/webpage.h`,
+then reflash.
+
+## What the colors mean
+
+| Cube | State |
+|---|---|
+| Pulsing blue | Busy — booting, joining WiFi, or taking an OTA update |
+| Solid white | WiFi joined successfully (3 s, then off) |
+| Red | Mic is open — you're on a call |
+| Green | Mic closed |
+
+Red and green are reserved for meeting status, so they never mean "wait".
+Note the cube can't be driven while the ESP sits in the *serial* bootloader
+— no code is running — so it holds whatever color it had.
 
 ## Bench tool
 

@@ -38,6 +38,9 @@ AsyncWebSocket ws("/ws");
 // WiFi credentials, WebSocket token, and OTA password live in secrets.h
 // (gitignored). Copy secrets.h.example to secrets.h and fill it in.
 #include "secrets.h"
+// Control page served at "/". Regenerate with tools/embed_html.py after
+// editing host/cube_control.html.
+#include "webpage.h"
 
 // The LED controller has no absolute-brightness code, so slam BRIGHT_UP
 // enough times to hit max from any level; extra presses at max are ignored
@@ -92,8 +95,11 @@ void setupWiFi() {
   WiFi.hostname(deviceHostname.c_str());  // Set the hostname before beginning WiFi connection
   WiFi.begin(ssid, password);
 
-  sendColor(ON, "ON");          // Change to ON
-  sendColor(STROBE, "STROBE");  // Pulsing effect to indicate WiFi connection attempt
+  // Blue = busy/not ready (booting, joining, updating). White = joined.
+  // Red/green are reserved for meeting status so they never mean "wait".
+  sendColor(ON, "ON");
+  sendColor(B, "Blue");
+  sendColor(STROBE, "STROBE");  // pulsing blue while joining WiFi
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
@@ -118,7 +124,13 @@ void setupOTA() {
     ws.enable(false);
     ws.closeAll();
     Serial.println("OTA update starting");
-    sendColor(STROBE, "STROBE");  // visual cue that the cube is being reflashed
+    // Pulsing blue for the duration of the flash. No brightness ramp here:
+    // loop() is starved during the transfer, and a blocking ramp would just
+    // delay the update by a few seconds.
+    pendingBumps = 0;
+    sendColor(ON, "ON");
+    sendColor(B, "Blue");
+    sendColor(STROBE, "STROBE");
   });
   ArduinoOTA.onEnd([]() {
     Serial.println("\nOTA done, rebooting");
@@ -141,8 +153,10 @@ void setupOTA() {
 }
 
 void setupWebServer() {
+  // The page carries no token — you type it once and the browser keeps it,
+  // so serving this to the LAN doesn't hand out the ability to drive the cube.
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/html", "Send color commands via WebSocket.");
+    request->send_P(200, "text/html", kControlPage);
   });
 
   // Diagnostics. Flash real-vs-configured is the one that matters: if they
@@ -322,7 +336,7 @@ void wifiConnectionFailed() {
 
 // Function to display 'Connection Successful' status
 void wifiConnectedSuccessfully() {
-  sendColor(W, "White");  // Change to white
+  sendColor(W, "White");  // solid white cancels the blue strobe
   maxBrightness();
   delay(3000);            // Display white for 3000ms
   sendColor(OFF, "OFF");  // Change to off
