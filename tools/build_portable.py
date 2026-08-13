@@ -42,6 +42,7 @@ APP_FILES = [
     (ROOT / "windows" / "portable" / "Install MeetMaster.bat", "Install MeetMaster.bat"),
     (ROOT / "windows" / "portable" / "Run without installing.bat", "Run without installing.bat"),
     (ROOT / "windows" / "portable" / "Uninstall MeetMaster.bat", "Uninstall MeetMaster.bat"),
+    (ROOT / "windows" / "portable" / "Debug MeetMaster.bat", "Debug MeetMaster.bat"),
     (ROOT / "windows" / "portable" / "README.txt", "README.txt"),
 ]
 

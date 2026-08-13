@@ -30,22 +30,76 @@ from wsclient import send_text            # noqa: E402
 APP_NAME = "MeetMaster"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 SETTINGS_PATH = Path(os.environ.get("APPDATA", ".")) / APP_NAME / "settings.json"
+LOG_PATH = SETTINGS_PATH.with_name("meetmaster.log")
+
+
+def log(message):
+    """Under pythonw there is no console, so failures must go to a file —
+    otherwise a startup crash looks like 'nothing happened'."""
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}\n")
+    except OSError:
+        pass
+
+
+def log_exception(where):
+    import traceback
+    log(f"EXCEPTION in {where}:\n{traceback.format_exc()}")
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-# ctypes defaults every restype to c_int, which truncates 64-bit handles
-# and pointers — the crash would be intermittent and machine-specific.
-user32.DefWindowProcW.restype = ctypes.c_ssize_t
-user32.DefWindowProcW.argtypes = (wintypes.HWND, wintypes.UINT,
-                                  wintypes.WPARAM, wintypes.LPARAM)
-user32.CreateWindowExW.restype = wintypes.HWND
-user32.LoadImageW.restype = wintypes.HANDLE
-user32.LoadIconW.restype = wintypes.HANDLE
-user32.CreatePopupMenu.restype = wintypes.HMENU
-kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-kernel32.CreateMutexW.restype = wintypes.HANDLE
+# ctypes defaults BOTH restype and argtypes to 32-bit c_int. On 64-bit
+# Windows, handles (HWND, HINSTANCE ≈ 0x7FF6...) don't fit in 32 bits, so
+# without full declarations they get truncated going IN as well as coming
+# OUT — CreateWindowExW quietly gets a garbage hInstance and the tray icon
+# never appears. Declare everything.
+LRESULT = ctypes.c_ssize_t
+LPVOID = ctypes.c_void_p
+
+def _sig(fn, restype, *argtypes):
+    fn.restype = restype
+    fn.argtypes = argtypes
+
+_sig(user32.DefWindowProcW, LRESULT,
+     wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+_sig(user32.CreateWindowExW, wintypes.HWND,
+     wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+     ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+     wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, LPVOID)
+_sig(user32.DestroyWindow, wintypes.BOOL, wintypes.HWND)
+_sig(user32.GetMessageW, ctypes.c_int,
+     LPVOID, wintypes.HWND, wintypes.UINT, wintypes.UINT)
+_sig(user32.TranslateMessage, wintypes.BOOL, LPVOID)
+_sig(user32.DispatchMessageW, LRESULT, LPVOID)
+_sig(user32.PostMessageW, wintypes.BOOL,
+     wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+_sig(user32.PostQuitMessage, None, ctypes.c_int)
+_sig(user32.CreatePopupMenu, wintypes.HMENU)
+_sig(user32.AppendMenuW, wintypes.BOOL,
+     wintypes.HMENU, wintypes.UINT, wintypes.WPARAM, wintypes.LPCWSTR)
+_sig(user32.TrackPopupMenu, ctypes.c_int,
+     wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+     ctypes.c_int, wintypes.HWND, LPVOID)
+_sig(user32.DestroyMenu, wintypes.BOOL, wintypes.HMENU)
+_sig(user32.GetCursorPos, wintypes.BOOL, LPVOID)
+_sig(user32.SetForegroundWindow, wintypes.BOOL, wintypes.HWND)
+_sig(user32.LoadImageW, wintypes.HANDLE,
+     wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+     ctypes.c_int, ctypes.c_int, wintypes.UINT)
+_sig(user32.LoadIconW, wintypes.HICON, wintypes.HINSTANCE, LPVOID)
+_sig(user32.GetSystemMetrics, ctypes.c_int, ctypes.c_int)
+_sig(user32.MessageBoxW, ctypes.c_int,
+     wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT)
+_sig(user32.RegisterWindowMessageW, wintypes.UINT, wintypes.LPCWSTR)
+_sig(user32.RegisterClassW, wintypes.WORD, LPVOID)
+_sig(shell32.Shell_NotifyIconW, wintypes.BOOL, wintypes.DWORD, LPVOID)
+_sig(kernel32.GetModuleHandleW, wintypes.HMODULE, wintypes.LPCWSTR)
+_sig(kernel32.CreateMutexW, wintypes.HANDLE,
+     LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
 
 WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
@@ -279,6 +333,16 @@ taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
 
 @WNDPROC
 def wnd_proc(h, msg, wparam, lparam):
+    try:
+        return _wnd_proc(h, msg, wparam, lparam)
+    except Exception:
+        # An exception escaping a ctypes callback corrupts nothing but is
+        # otherwise swallowed — log it so it's diagnosable.
+        log_exception("wnd_proc")
+        return user32.DefWindowProcW(h, msg, wparam, lparam)
+
+
+def _wnd_proc(h, msg, wparam, lparam):
     if msg == WM_APP_TRAY:
         if lparam in (WM_RBUTTONUP, WM_LBUTTONUP):
             show_menu()
@@ -300,6 +364,7 @@ def wnd_proc(h, msg, wparam, lparam):
 def main():
     global hwnd, nid
 
+    log(f"starting: python {sys.version.split()[0]} at {sys.executable}")
     load_settings()
     if not settings.get("token"):
         message_box(
@@ -321,9 +386,16 @@ def main():
     wc.lpfnWndProc = wnd_proc
     wc.hInstance = kernel32.GetModuleHandleW(None)
     wc.lpszClassName = f"{APP_NAME}TrayWindow"
-    user32.RegisterClassW(ctypes.byref(wc))
+    if not user32.RegisterClassW(ctypes.byref(wc)):
+        log(f"RegisterClassW failed: {ctypes.get_last_error()}")
     hwnd = user32.CreateWindowExW(0, wc.lpszClassName, APP_NAME, 0,
                                   0, 0, 0, 0, None, None, wc.hInstance, None)
+    if not hwnd:
+        err = ctypes.get_last_error()
+        log(f"CreateWindowExW failed: {err}")
+        message_box(f"Could not create the tray window (error {err}).\n"
+                    f"See {LOG_PATH}", 0x10)
+        return
 
     load_icons()
     nid = NOTIFYICONDATAW()
@@ -332,7 +404,10 @@ def main():
     nid.uID = 1
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
     nid.uCallbackMessage = WM_APP_TRAY
-    tray_update(add=True)
+    if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
+        log(f"Shell_NotifyIconW(NIM_ADD) failed: {ctypes.get_last_error()}")
+    tray_update()
+    log("tray icon added; entering message loop")
 
     threading.Thread(target=watcher, daemon=True).start()
 
@@ -343,4 +418,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log_exception("main")
+        raise
