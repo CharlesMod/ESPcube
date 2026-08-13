@@ -1,0 +1,61 @@
+name: Build MeetMaster (Windows)
+
+# PyInstaller cannot cross-compile, so the exe is built on a real Windows
+# runner. Download it from the run's Artifacts, or from a tagged Release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'windows/**'
+      - 'host/mic_detect.py'
+      - 'host/discover.py'
+      - 'host/wsclient.py'
+      - '.github/workflows/build-windows.yml'
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build deps
+        run: pip install pyinstaller pystray pillow
+
+      - name: Build MeetMaster.exe
+        run: >
+          pyinstaller
+          --onefile
+          --windowed
+          --name MeetMaster
+          --paths host
+          --hidden-import pystray._win32
+          --icon windows/meetmaster.ico
+          windows/meetmaster.py
+
+      - name: Smoke test (exe exists and is signed-off sane)
+        shell: pwsh
+        run: |
+          $exe = "dist/MeetMaster.exe"
+          if (!(Test-Path $exe)) { throw "build produced no exe" }
+          $size = (Get-Item $exe).Length
+          Write-Host "Built $exe ($([math]::Round($size/1MB,1)) MB)"
+          if ($size -lt 3MB) { throw "exe suspiciously small - deps likely missing" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MeetMaster
+          path: dist/MeetMaster.exe
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MeetMaster.exe

@@ -2,11 +2,11 @@
 
 import time
 
-from websocket import create_connection
 from pystray import Icon, MenuItem, Menu
 from PIL import Image
 
 from config import CUBE_URL, TOKEN
+from wsclient import send_text
 from discover import find_cube
 from mic_detect import mic_in_use, wait_for_mic_change
 
@@ -23,9 +23,7 @@ def send_command(mic_active):
     # address fails once and rediscovery finds it again without a restart.
     for attempt in (1, 2):
         try:
-            ws = create_connection(cube_url, timeout=5)
-            ws.send(f"{TOKEN}:{command}")
-            ws.close()
+            send_text(cube_url, f"{TOKEN}:{command}")
             return
         except Exception as e:
             if attempt == 1:
