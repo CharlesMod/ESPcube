@@ -12,9 +12,12 @@ REPL commands:
     R G B W ...     firmware's normal path (ON + color + auto-ramp)
     raw R           send just the red code, no ON, no ramp
     raw ff906f      send an arbitrary NEC code
+    nec 90          send NEC command byte 0x90 (expands to 00FF906F)
     bump 5          press BRIGHT_UP 5 times
     down 5          press BRIGHT_DOWN 5 times
     sweep R         step brightness one press at a time, pausing to watch
+    scan            walk all 256 NEC command bytes, hunting hidden functions
+    scan 00 3f      scan a subrange
     keys            list the known 24-key codes
     quit
 """
@@ -76,12 +79,44 @@ def send(payload):
     return True
 
 
+def nec_code(cmd_byte):
+    """Build the full NEC code for a command byte.
+
+    This remote is NEC address 0x00, so every button is 00FF<cmd><~cmd>.
+    Red (0x90) -> 0x00FF906F. That means the entire button space is just
+    256 codes, and the ones not printed on the remote are still worth
+    trying — undocumented codes sometimes expose functions the remote
+    has no button for.
+    """
+    return 0x00FF0000 | ((cmd_byte & 0xFF) << 8) | (~cmd_byte & 0xFF)
+
+
 def raw(name_or_hex):
     key = name_or_hex.upper()
     code = KEYS.get(key)
     if code is None:
-        code = int(name_or_hex, 16)
+        v = name_or_hex.lower().replace("0x", "")
+        code = nec_code(int(v, 16)) if len(v) <= 2 else int(v, 16)
     send(f"RAW:{code:06X}")
+
+
+def scan(start=0x00, end=0xFF, pause=1.5):
+    """Walk the NEC command space, pausing so you can watch the cube.
+
+    Note which command numbers do something the remote's buttons don't.
+    Known codes are labelled so you can skip past them.
+    """
+    known = {v: k for k, v in KEYS.items()}
+    total = end - start + 1
+    print(f"\nScanning commands 0x{start:02X}-0x{end:02X} ({total} codes, "
+          f"~{total * pause / 60:.1f} min). Ctrl-C to stop.\n")
+    for cmd in range(start, end + 1):
+        code = nec_code(cmd)
+        label = known.get(code, "")
+        send(f"RAW:{code:06X}")
+        print(f"    cmd 0x{cmd:02X}  code 0x{code:06X}  {label}")
+        time.sleep(pause)
+    print("\nscan done.")
 
 
 def sweep(color="R", steps=24, pause=1.2):
@@ -136,6 +171,11 @@ def repl():
                 time.sleep(0.12)
         elif cmd == "sweep":
             sweep(args[0].upper() if args else "R")
+        elif cmd == "nec":
+            raw(args[0]) if args else print("  usage: nec <command byte>")
+        elif cmd == "scan":
+            a = [int(x, 16) for x in args[:2]]
+            scan(*(a or [0x00, 0xFF]))
         else:
             send(parts[0].upper())
 

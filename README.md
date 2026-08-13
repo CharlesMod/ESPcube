@@ -124,6 +124,12 @@ Per-OS notes:
 Start it with your session: Task Scheduler (Windows), a Login Item or
 launchd agent (macOS), or a systemd user service / autostart entry (Linux).
 
+## Controller app
+
+Open `host/cube_control.html` in any browser — desktop or phone. Colors,
+brightness, effects, and a raw-IR box. Enter the cube's IP and token once;
+they're kept in that browser's localStorage, never in the repo.
+
 ## Bench tool
 
 ```bash
@@ -137,6 +143,22 @@ with a pause, printing the press number — watch the cube and note where it
 stops changing. That tells you the controller's real step count instead of
 guessing. `raw <name|hex>` fires a single IR code with no `ON` wrapper and
 no auto-ramp, for isolating what each code actually does.
+
+### Hunting for undocumented codes
+
+This remote is NEC address `0x00`, so every possible button is
+`00FF<cmd><~cmd>` — the whole command space is just 256 codes, and the 24
+printed on the remote are only a tenth of them. `scan` walks all of them
+with a pause between each, labelling the ones you already know:
+
+```bash
+python3 host/ircube.py            # then: scan       (all 256, ~6 min)
+                                  #   or: scan 00 3f (a subrange)
+```
+
+Watch the cube and note any command that does something the remote's own
+buttons can't — a direct brightness level, a different white balance, a
+stored scene. Send one by number afterwards with `nec 90`.
 
 ### A note on red vs white brightness
 

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESPcube control</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1d2026; --edge: #2c313a;
+    --ink: #e8eaed; --dim: #9aa3af; --accent: #4f8cff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f5f7; --panel:#fff; --edge:#dfe3e8; --ink:#1a1d21; --dim:#5c6672; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    display: flex; justify-content: center;
+  }
+  .wrap { width: 100%; max-width: 460px; }
+  h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); font-size: .85rem; margin-bottom: 1.25rem; }
+  .card {
+    background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 12px; padding: 1rem; margin-bottom: 1rem;
+  }
+  .card h2 {
+    font-size: .75rem; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--dim); margin: 0 0 .75rem; font-weight: 600;
+  }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
+  .grid.four { grid-template-columns: repeat(4, 1fr); }
+  button {
+    font: inherit; font-weight: 600; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--edge);
+    border-radius: 9px; padding: .7rem .5rem; cursor: pointer;
+    transition: transform .06s, filter .15s;
+  }
+  button:hover { filter: brightness(1.25); }
+  button:active { transform: scale(.96); }
+  button.swatch { color: #fff; border: none; text-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  .white  { background: #f2f2f2; color: #222 !important; text-shadow: none; }
+  .red    { background: #d8262b; }
+  .green  { background: #1d9d3f; }
+  .blue   { background: #1f6fd0; }
+  .off    { background: #3a3f48; }
+  .row { display: flex; gap: .6rem; }
+  .row button { flex: 1; }
+  input {
+    font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--edge); border-radius: 9px;
+    padding: .6rem .7rem; width: 100%;
+  }
+  .cfg { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
+  .status {
+    display: flex; align-items: center; gap: .5rem;
+    font-size: .85rem; color: var(--dim); margin-top: .25rem;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #777; flex: none; }
+  .dot.ok { background: #22c55e; } .dot.bad { background: #ef4444; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ESPcube</h1>
+  <div class="sub">Meeting indicator &amp; IR remote</div>
+
+  <div class="card">
+    <h2>Connection</h2>
+    <div class="cfg">
+      <input id="host" placeholder="cube IP">
+      <input id="token" placeholder="token" type="password">
+    </div>
+    <div class="status"><span class="dot" id="dot"></span><span id="msg">enter host + token</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Status colors</h2>
+    <div class="grid">
+      <button class="swatch red"   onclick="send('R')">Red</button>
+      <button class="swatch green" onclick="send('G')">Green</button>
+      <button class="swatch white" onclick="send('W')">White</button>
+    </div>
+    <div class="grid" style="margin-top:.6rem">
+      <button class="swatch blue" onclick="send('B')">Blue</button>
+      <button onclick="send('ON')">On</button>
+      <button class="swatch off" onclick="send('OFF')">Off</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Brightness</h2>
+    <div class="row">
+      <button onclick="send('BRIGHT_DOWN')">&minus;</button>
+      <button onclick="send('BRIGHT_UP')">+</button>
+      <button onclick="send('BUMP:25')">Max</button>
+    </div>
+    <div class="sub" style="margin:.6rem 0 0">
+      No absolute-brightness code exists on these controllers &mdash; Max just
+      sends 25 step-ups, which saturates from any level.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Effects</h2>
+    <div class="grid four">
+      <button onclick="send('FLASH')">Flash</button>
+      <button onclick="send('STROBE')">Strobe</button>
+      <button onclick="send('FADE')">Fade</button>
+      <button onclick="send('SMOOTH')">Smooth</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Raw IR</h2>
+    <div class="cfg">
+      <input id="raw" placeholder="FF906F or 0x90">
+      <button onclick="sendRaw()">Send</button>
+    </div>
+    <div class="sub" style="margin:.6rem 0 0">
+      Full NEC code (<code>FF906F</code>) or a bare command byte
+      (<code>0x90</code>), which expands to <code>00FF&lt;cmd&gt;&lt;~cmd&gt;</code>.
+      Sent with no <code>ON</code> wrapper and no auto-ramp.
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+// Settings live in this browser only, never in the repo.
+$('host').value  = localStorage.getItem('cube_host')  || '';
+$('token').value = localStorage.getItem('cube_token') || '';
+$('host').oninput  = e => localStorage.setItem('cube_host', e.target.value.trim());
+$('token').oninput = e => localStorage.setItem('cube_token', e.target.value.trim());
+
+function status(text, cls) {
+  $('msg').textContent = text;
+  $('dot').className = 'dot' + (cls ? ' ' + cls : '');
+}
+
+function send(cmd) {
+  const host = $('host').value.trim(), token = $('token').value.trim();
+  if (!host || !token) return status('enter host + token', 'bad');
+  status('sending ' + cmd + '…');
+  let ws;
+  try { ws = new WebSocket('ws://' + host + '/ws'); }
+  catch (e) { return status('bad host', 'bad'); }
+  const timer = setTimeout(() => { try { ws.close(); } catch (e) {} status('timeout', 'bad'); }, 5000);
+  ws.onopen = () => {
+    ws.send(token + ':' + cmd);
+    clearTimeout(timer);
+    status('sent ' + cmd, 'ok');
+    setTimeout(() => { try { ws.close(); } catch (e) {} }, 150);
+  };
+  ws.onerror = () => { clearTimeout(timer); status('cannot reach cube', 'bad'); };
+}
+
+function sendRaw() {
+  let v = $('raw').value.trim().replace(/^0x/i, '');
+  if (!v) return;
+  if (v.length <= 2) {                        // bare command byte
+    const cmd = parseInt(v, 16);
+    if (isNaN(cmd)) return status('bad hex', 'bad');
+    v = (0x00FF0000 | (cmd << 8) | (~cmd & 0xFF)).toString(16).toUpperCase().padStart(6, '0');
+  }
+  send('RAW:' + v);
+}
+</script>
+</body>
+</html>
