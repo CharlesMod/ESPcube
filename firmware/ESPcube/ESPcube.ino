@@ -49,6 +49,11 @@ const uint16_t kBrightnessStepMs = 120;
 
 String deviceHostname;
 
+// Brightness presses are paced out from loop() rather than with delay(),
+// so a 3-second ramp never blocks the async TCP stack mid-callback.
+uint8_t pendingBumps = 0;
+unsigned long lastBumpMs = 0;
+
 void setup() {
   Serial.begin(9600);
   irsend.begin();
@@ -64,6 +69,14 @@ void setup() {
 
 void loop() {
   ArduinoOTA.handle();
+
+  if (pendingBumps > 0 && millis() - lastBumpMs >= kBrightnessStepMs) {
+    irsend.sendNEC(BRIGHT_UP, 32);
+    lastBumpMs = millis();
+    if (--pendingBumps == 0) {
+      Serial.println("Brightness maxed");
+    }
+  }
 }
 
 void setupWiFi() {
@@ -206,12 +219,9 @@ void handleColorCommand(const String &command) {
     return;
   }
   if (trimmedCommand.startsWith("BUMP:")) {
-    int n = trimmedCommand.substring(5).toInt();
-    for (int i = 0; i < n; i++) {
-      delay(kBrightnessStepMs);
-      irsend.sendNEC(BRIGHT_UP, 32);
-    }
-    Serial.printf("BUMP x%d\n", n);
+    pendingBumps = trimmedCommand.substring(5).toInt();
+    lastBumpMs = millis();
+    Serial.printf("BUMP x%d queued\n", pendingBumps);
     return;
   }
 
@@ -279,7 +289,8 @@ void handleColorCommand(const String &command) {
     // manual brightness keys, which would otherwise fight the operator.
     if (trimmedCommand != "OFF" && trimmedCommand != "BRIGHT_UP" &&
         trimmedCommand != "BRIGHT_DOWN") {
-      maxBrightness();
+      pendingBumps = kBrightnessSteps;  // paced out from loop()
+      lastBumpMs = millis();
     }
   } else {
     Serial.println("Received unknown command: " + command);
