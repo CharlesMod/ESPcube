@@ -34,6 +34,10 @@ try:
 except ImportError:
     raise SystemExit("no config.py — copy config.example.py and fill it in")
 
+from discover import find_cube
+
+CUBE_URL = find_cube(explicit=CUBE_URL)
+
 # Standard 24-key RGB(W) remote, NEC. Row order matches the physical remote.
 KEYS = {
     "BRIGHT_UP": 0xFFA05F, "BRIGHT_DOWN": 0xFF20DF, "OFF": 0xFF609F, "ON": 0xFFE01F,

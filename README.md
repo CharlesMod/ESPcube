@@ -145,13 +145,60 @@ then reflash.
 | Cube | State |
 |---|---|
 | Pulsing blue | Busy — booting, joining WiFi, or taking an OTA update |
-| Solid white | WiFi joined successfully (3 s, then off) |
+| Solid white | WiFi joined successfully (3 s) |
+| Green | Mic closed — nobody's on a call. **This is the resting default.** |
 | Red | Mic is open — you're on a call |
-| Green | Mic closed |
 
-Red and green are reserved for meeting status, so they never mean "wait".
-Note the cube can't be driven while the ESP sits in the *serial* bootloader
-— no code is running — so it holds whatever color it had.
+Red is never used for anything but an open mic, so it can't be
+misread. The cube settles on green after boot rather than going dark,
+because "no call in progress" is a real state worth showing.
+
+The cube can't be driven while the ESP sits in the *serial* bootloader —
+no code is running — so it holds whatever color it had.
+
+## No hardcoded addresses
+
+Neither end needs to know the other's IP. The host app finds the cube by,
+in order:
+
+1. an explicit `CUBE_URL` in `config.py`, if you set one (leave it `None`)
+2. the address that worked last time, cached on disk
+3. **UDP broadcast** — the cube listens on port 9999 and answers with its
+   own address
+4. **mDNS** — `espcube.local`
+
+DHCP can move the cube whenever it likes; the first send fails, the app
+rediscovers, and it keeps working without a restart. The control page has
+the same property from the other direction: served by the cube, it reads
+its own address out of the URL.
+
+If discovery ever comes up empty, the usual cause is **AP client isolation**
+(common on guest networks), which blocks the broadcast. Pinning `CUBE_URL`
+works around it.
+
+## Day/night brightness
+
+The cube runs at full brightness during the day and backs off after dark,
+gliding one step at a time over about 15 minutes so sunset reads as dusk
+rather than a switch being thrown. Whatever color is showing at the time
+just gets dimmer — the color itself never changes.
+
+Sunrise and sunset are computed on the device from your latitude and
+longitude (set in `secrets.h`) using the standard Almanac algorithm, so
+there's no weather API to depend on — only NTP for the clock. Daylight
+saving is handled by the POSIX `TZ` string, which encodes the rules.
+
+Check what it thinks with `http://<cube>/info`:
+
+```
+local time: 12:38
+sunrise: 05:56
+sunset: 19:54
+mode: day (full)
+```
+
+Tune the night level with `kNightDimSteps` in the sketch (how many steps
+below maximum) and `kGlideStepMs` (how long the fade takes).
 
 ## Bench tool
 

@@ -3,11 +3,15 @@
 // OTA reject every image with "Flash config wrong"; check http://<cube>/info.
 
 #include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoOTA.h>
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
+#include <time.h>
+#include <math.h>
 
 const uint16_t kIrLedPin = 4;
 IRsend irsend(kIrLedPin);
@@ -50,17 +54,41 @@ const uint8_t kBrightnessSteps = 25;
 // Presses closer together than this can be debounced away as one hold.
 const uint16_t kBrightnessStepMs = 120;
 
+// After dark, back off this many steps from maximum. The controller has no
+// absolute-brightness code, so "night" is always expressed as a distance
+// down from a known ceiling.
+const uint8_t kNightDimSteps = 10;
+// Sunrise/sunset is glided one step at a time so the change reads as dawn
+// rather than a switch flipping: 10 steps * 90s = a 15-minute fade.
+const uint32_t kGlideStepMs = 90000UL;
+
+// Discovery: the host app broadcasts kDiscoverMagic to this port and the
+// cube answers with its address, so neither end needs a hardcoded IP.
+const uint16_t kDiscoveryPort = 9999;
+const char *kDiscoverMagic = "ESPCUBE_DISCOVER";
+WiFiUDP discoveryUdp;
+
 String deviceHostname;
 
 // Brightness presses are paced out from loop() rather than with delay(),
-// so a 3-second ramp never blocks the async TCP stack mid-callback.
-uint8_t pendingBumps = 0;
+// so a long ramp never blocks the async TCP stack mid-callback. Up presses
+// run before down presses, which is how "go to max, then drop N" is
+// expressed without tracking an absolute level the controller won't report.
+uint8_t pendingUp = 0;
+uint8_t pendingDown = 0;
 unsigned long lastBumpMs = 0;
+uint32_t bumpIntervalMs = kBrightnessStepMs;
+
+bool nightMode = false;
+bool clockReady = false;
+int lastSunCheckMinute = -1;
 
 void setup() {
   Serial.begin(9600);
   irsend.begin();
   setupWiFi();
+  setupTime();
+  setupDiscovery();
   setupOTA();
   setupWebServer();
   ws.onEvent(onWebSocketEvent);
@@ -72,14 +100,42 @@ void setup() {
 
 void loop() {
   ArduinoOTA.handle();
+  MDNS.update();
+  handleDiscovery();
+  checkDaylight();
 
-  if (pendingBumps > 0 && millis() - lastBumpMs >= kBrightnessStepMs) {
-    irsend.sendNEC(BRIGHT_UP, 32);
+  if ((pendingUp > 0 || pendingDown > 0) &&
+      millis() - lastBumpMs >= bumpIntervalMs) {
+    if (pendingUp > 0) {
+      irsend.sendNEC(BRIGHT_UP, 32);
+      pendingUp--;
+    } else {
+      irsend.sendNEC(BRIGHT_DOWN, 32);
+      pendingDown--;
+    }
     lastBumpMs = millis();
-    if (--pendingBumps == 0) {
-      Serial.println("Brightness maxed");
+    if (pendingUp == 0 && pendingDown == 0) {
+      Serial.printf("Brightness settled (%s)\n", nightMode ? "night" : "day");
     }
   }
+}
+
+// Drive brightness to the level appropriate for the time of day: all the
+// way up, then back down by the night offset if it's dark out.
+void applyBrightness(bool glide) {
+  pendingUp = kBrightnessSteps;
+  pendingDown = nightMode ? kNightDimSteps : 0;
+  bumpIntervalMs = glide ? kGlideStepMs : kBrightnessStepMs;
+  lastBumpMs = millis();
+}
+
+// A sunrise/sunset crossing shouldn't restate the color — only nudge the
+// level of whatever is already showing, slowly.
+void glideToDaylightLevel() {
+  pendingUp = nightMode ? 0 : kNightDimSteps;
+  pendingDown = nightMode ? kNightDimSteps : 0;
+  bumpIntervalMs = kGlideStepMs;
+  lastBumpMs = millis();
 }
 
 void setupWiFi() {
@@ -115,6 +171,139 @@ void setupWiFi() {
   wifiConnectedSuccessfully();
 }
 
+// ---------------------------------------------------------------------------
+// Daylight tracking
+//
+// Sunrise/sunset from the standard Almanac algorithm — no network service
+// involved, so the cube keeps dimming correctly even if the internet is out.
+// Returns local minutes-past-midnight, or -1 above the arctic circle where
+// the sun may not rise or set at all on a given date.
+// ---------------------------------------------------------------------------
+
+static double deg2rad(double d) { return d * M_PI / 180.0; }
+static double rad2deg(double r) { return r * 180.0 / M_PI; }
+static double clamp360(double v) {
+  while (v < 0) v += 360.0;
+  while (v >= 360.0) v -= 360.0;
+  return v;
+}
+
+int sunEventLocalMinutes(int dayOfYear, bool rising, int tzOffsetMinutes) {
+  const double zenith = 90.833;  // includes atmospheric refraction
+  double lngHour = kLongitude / 15.0;
+  double t = dayOfYear + (((rising ? 6.0 : 18.0) - lngHour) / 24.0);
+
+  double M = (0.9856 * t) - 3.289;
+  double L = clamp360(M + (1.916 * sin(deg2rad(M))) +
+                      (0.020 * sin(deg2rad(2 * M))) + 282.634);
+
+  double RA = clamp360(rad2deg(atan(0.91764 * tan(deg2rad(L)))));
+  // RA must land in the same quadrant as L.
+  RA += (floor(L / 90.0) * 90.0) - (floor(RA / 90.0) * 90.0);
+  RA /= 15.0;
+
+  double sinDec = 0.39782 * sin(deg2rad(L));
+  double cosDec = cos(asin(sinDec));
+  double cosH = (cos(deg2rad(zenith)) - (sinDec * sin(deg2rad(kLatitude)))) /
+                (cosDec * cos(deg2rad(kLatitude)));
+  if (cosH > 1 || cosH < -1) return -1;  // sun never rises/sets today
+
+  double H = rising ? 360.0 - rad2deg(acos(cosH)) : rad2deg(acos(cosH));
+  H /= 15.0;
+
+  double T = H + RA - (0.06571 * t) - 6.622;
+  double UT = T - lngHour;
+  while (UT < 0) UT += 24.0;
+  while (UT >= 24.0) UT -= 24.0;
+
+  int minutes = (int)lround(UT * 60.0) + tzOffsetMinutes;
+  while (minutes < 0) minutes += 1440;
+  return minutes % 1440;
+}
+
+// Today's sunrise/sunset in local minutes, plus whether it's currently dark.
+// Returns false if the clock isn't set or the sun doesn't rise/set today.
+bool daylightNow(int *sunriseOut, int *sunsetOut, bool *darkOut) {
+  if (!clockReady) return false;
+  time_t now = time(nullptr);
+  if (now < 100000) return false;  // NTP hasn't landed yet
+
+  struct tm lt, gt;
+  localtime_r(&now, &lt);
+  gmtime_r(&now, &gt);
+
+  int tzOffset = (lt.tm_hour * 60 + lt.tm_min) - (gt.tm_hour * 60 + gt.tm_min);
+  if (tzOffset > 720) tzOffset -= 1440;
+  if (tzOffset < -720) tzOffset += 1440;
+
+  int sunrise = sunEventLocalMinutes(gt.tm_yday + 1, true, tzOffset);
+  int sunset = sunEventLocalMinutes(gt.tm_yday + 1, false, tzOffset);
+  if (sunrise < 0 || sunset < 0) return false;
+
+  int nowMin = lt.tm_hour * 60 + lt.tm_min;
+  *sunriseOut = sunrise;
+  *sunsetOut = sunset;
+  *darkOut = (sunrise < sunset) ? (nowMin < sunrise || nowMin >= sunset)
+                                : (nowMin < sunrise && nowMin >= sunset);
+  return true;
+}
+
+// Re-evaluate day/night once a minute; glide the brightness on a crossing.
+void checkDaylight() {
+  if (!clockReady) return;
+  time_t now = time(nullptr);
+  struct tm lt;
+  localtime_r(&now, &lt);
+  if (lt.tm_min == lastSunCheckMinute) return;
+  lastSunCheckMinute = lt.tm_min;
+
+  int sunrise, sunset;
+  bool dark;
+  if (!daylightNow(&sunrise, &sunset, &dark)) return;
+
+  if (dark != nightMode) {
+    nightMode = dark;
+    Serial.printf("%s (sunrise %02d:%02d, sunset %02d:%02d) — gliding\n",
+                  dark ? "Sunset" : "Sunrise", sunrise / 60, sunrise % 60,
+                  sunset / 60, sunset % 60);
+    glideToDaylightLevel();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+void handleDiscovery() {
+  int size = discoveryUdp.parsePacket();
+  if (size <= 0) return;
+  char buf[64] = {0};
+  int len = discoveryUdp.read(buf, sizeof(buf) - 1);
+  if (len <= 0) return;
+  buf[len] = 0;
+  if (strncmp(buf, kDiscoverMagic, strlen(kDiscoverMagic)) != 0) return;
+
+  String reply = "ESPCUBE:" + WiFi.localIP().toString() + ":" + deviceHostname;
+  discoveryUdp.beginPacket(discoveryUdp.remoteIP(), discoveryUdp.remotePort());
+  discoveryUdp.write(reply.c_str());
+  discoveryUdp.endPacket();
+  Serial.println("Discovery reply -> " + discoveryUdp.remoteIP().toString());
+}
+
+void setupDiscovery() {
+  // mDNS: reachable as espcube.local from any browser, plus a service record
+  // for anything that would rather browse than broadcast.
+  if (MDNS.begin("espcube")) {
+    MDNS.addService("http", "tcp", 80);
+    MDNS.addService("espcube", "tcp", 80);
+    Serial.println("mDNS: http://espcube.local");
+  } else {
+    Serial.println("mDNS failed to start");
+  }
+  discoveryUdp.begin(kDiscoveryPort);
+  Serial.printf("Discovery listening on UDP %u\n", kDiscoveryPort);
+}
+
 void setupOTA() {
   ArduinoOTA.setHostname(deviceHostname.c_str());
   ArduinoOTA.setPassword(otaPassword);
@@ -127,7 +316,7 @@ void setupOTA() {
     // Pulsing blue for the duration of the flash. No brightness ramp here:
     // loop() is starved during the transfer, and a blocking ramp would just
     // delay the update by a few seconds.
-    pendingBumps = 0;
+    pendingUp = pendingDown = 0;
     sendColor(ON, "ON");
     sendColor(B, "Blue");
     sendColor(STROBE, "STROBE");
@@ -172,6 +361,23 @@ void setupWebServer() {
     out += "sketch: " + String(ESP.getSketchSize()) + "\n";
     out += "free sketch space: " + String(ESP.getFreeSketchSpace()) + "\n";
     out += "core: " + String(ESP.getCoreVersion()) + "\n";
+
+    int sunrise, sunset;
+    bool dark;
+    if (daylightNow(&sunrise, &sunset, &dark)) {
+      time_t now = time(nullptr);
+      struct tm lt;
+      localtime_r(&now, &lt);
+      char buf[96];
+      snprintf(buf, sizeof(buf),
+               "local time: %02d:%02d\nsunrise: %02d:%02d\nsunset: %02d:%02d\n"
+               "mode: %s\n",
+               lt.tm_hour, lt.tm_min, sunrise / 60, sunrise % 60, sunset / 60,
+               sunset % 60, dark ? "night (dimmed)" : "day (full)");
+      out += buf;
+    } else {
+      out += "clock: not set (staying at day brightness)\n";
+    }
     request->send(200, "text/plain", out);
   });
 }
@@ -233,9 +439,13 @@ void handleColorCommand(const String &command) {
     return;
   }
   if (trimmedCommand.startsWith("BUMP:")) {
-    pendingBumps = trimmedCommand.substring(5).toInt();
+    // Negative counts step down, so the bench tool can drive both directions.
+    int n = trimmedCommand.substring(5).toInt();
+    pendingUp = n > 0 ? n : 0;
+    pendingDown = n < 0 ? -n : 0;
+    bumpIntervalMs = kBrightnessStepMs;
     lastBumpMs = millis();
-    Serial.printf("BUMP x%d queued\n", pendingBumps);
+    Serial.printf("BUMP %d queued\n", n);
     return;
   }
 
@@ -303,8 +513,7 @@ void handleColorCommand(const String &command) {
     // manual brightness keys, which would otherwise fight the operator.
     if (trimmedCommand != "OFF" && trimmedCommand != "BRIGHT_UP" &&
         trimmedCommand != "BRIGHT_DOWN") {
-      pendingBumps = kBrightnessSteps;  // paced out from loop()
-      lastBumpMs = millis();
+      applyBrightness(false);  // fast ramp, night-aware
     }
   } else {
     Serial.println("Received unknown command: " + command);
@@ -319,12 +528,47 @@ void sendColor(uint32_t colorCode, String colorName) {
   Serial.println(colorCode, HEX);
 }
 
+// Blocking ramp — only for use during setup(), before the async server is
+// serving. Everywhere else use applyBrightness(), which paces from loop().
 void maxBrightness() {
   for (uint8_t i = 0; i < kBrightnessSteps; i++) {
     delay(kBrightnessStepMs);  // discrete presses, not NEC repeat frames
     irsend.sendNEC(BRIGHT_UP, 32);
   }
   Serial.println("Brightness maxed");
+}
+
+// NTP, needed only so the cube knows when the sun rises and sets. TZ string
+// handles daylight saving without us tracking the rules.
+void setupTime() {
+  configTime(kTimezone, "pool.ntp.org", "time.nist.gov");
+  Serial.print("Waiting for NTP");
+  for (int i = 0; i < 40 && time(nullptr) < 100000; i++) {
+    delay(250);
+    Serial.print(".");
+  }
+  time_t now = time(nullptr);
+  clockReady = now > 100000;
+  if (clockReady) {
+    struct tm lt;
+    localtime_r(&now, &lt);
+    Serial.printf("\nLocal time: %04d-%02d-%02d %02d:%02d\n", lt.tm_year + 1900,
+                  lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min);
+
+    // Adopt the current level outright — at boot there's no dawn to simulate,
+    // so set nightMode directly rather than letting checkDaylight() glide.
+    int sunrise, sunset;
+    bool dark;
+    if (daylightNow(&sunrise, &sunset, &dark)) {
+      nightMode = dark;
+      lastSunCheckMinute = lt.tm_min;
+      Serial.printf("Sunrise %02d:%02d, sunset %02d:%02d — starting in %s mode\n",
+                    sunrise / 60, sunrise % 60, sunset / 60, sunset % 60,
+                    dark ? "night" : "day");
+    }
+  } else {
+    Serial.println("\nNTP unavailable — staying at day brightness");
+  }
 }
 
 // Function to display 'Connection Failed' status
@@ -339,5 +583,8 @@ void wifiConnectedSuccessfully() {
   sendColor(W, "White");  // solid white cancels the blue strobe
   maxBrightness();
   delay(3000);            // Display white for 3000ms
-  sendColor(OFF, "OFF");  // Change to off
+  // Rest at green, not off: green is "nobody is on a call", which is the
+  // truthful default. Red must only ever mean an open mic.
+  sendColor(G, "Green");
+  applyBrightness(false);
 }
