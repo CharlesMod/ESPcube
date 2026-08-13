@@ -33,6 +33,7 @@ PY_URL = (f"https://www.python.org/ftp/python/{PY_VERSION}/"
 
 APP_FILES = [
     (ROOT / "windows" / "portable" / "meetmaster_tray.py", "app/meetmaster_tray.py"),
+    (ROOT / "windows" / "portable" / "selftest.py", "app/selftest.py"),
     (ROOT / "host" / "mic_detect.py", "app/mic_detect.py"),
     (ROOT / "host" / "discover.py", "app/discover.py"),
     (ROOT / "host" / "wsclient.py", "app/wsclient.py"),

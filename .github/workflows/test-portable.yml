@@ -1,0 +1,115 @@
+name: Test portable bundle (Windows)
+
+# The portable bundle's Win32 code can only be proven on real Windows.
+# This runs the ACTUAL user journey on a windows-latest runner: build the
+# zip, run the self-test under the bundled runtime, then double-click-
+# equivalent the installer against a fake cube and assert the app came up,
+# registered auto-start, spoke the protocol, and exits on the upgrade
+# broadcast. Only a green run here is allowed onto the release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'windows/portable/**'
+      - 'host/mic_detect.py'
+      - 'host/discover.py'
+      - 'host/wsclient.py'
+      - 'tools/build_portable.py'
+      - 'tests/**'
+      - '.github/workflows/test-portable.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build the bundle
+        run: python tools/build_portable.py
+
+      - name: Extract as a user would
+        shell: pwsh
+        run: Expand-Archive dist/MeetMaster-portable.zip -DestinationPath stage
+
+      - name: Self-test under the BUNDLED runtime
+        shell: pwsh
+        run: |
+          & "stage/MeetMaster/python/python.exe" "stage/MeetMaster/app/selftest.py"
+          if ($LASTEXITCODE -ne 0) { throw "selftest failed" }
+
+      - name: Start fake cube and seed settings
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:APPDATA\MeetMaster" | Out-Null
+          Set-Content "$env:APPDATA\MeetMaster\settings.json" '{"token": "citoken", "cube_url": "ws://127.0.0.1:8765/ws"}'
+          Start-Process python -ArgumentList "tests/fake_cube.py","8765","$env:RUNNER_TEMP\cube_rx.txt" -WindowStyle Hidden
+          Start-Sleep 2
+
+      - name: Run the real installer (the double-click path)
+        shell: cmd
+        env:
+          MEETMASTER_CI: '1'
+        run: call "stage\MeetMaster\Install MeetMaster.bat"
+
+      - name: Assert app is up, spoke to the cube, and registered auto-start
+        shell: pwsh
+        run: |
+          $log = "$env:APPDATA\MeetMaster\meetmaster.log"
+          $rx  = "$env:RUNNER_TEMP\cube_rx.txt"
+          $deadline = (Get-Date).AddSeconds(45)
+          while ((Get-Date) -lt $deadline) {
+            $loopOk = (Test-Path $log) -and (Select-String -Path $log -Pattern 'entering message loop' -Quiet)
+            $cmdOk  = (Test-Path $rx) -and ((Get-Content $rx -ErrorAction SilentlyContinue) -match '^citoken:[GR]$')
+            if ($loopOk -and $cmdOk) { break }
+            Start-Sleep 1
+          }
+          Write-Host "=== meetmaster.log ==="
+          Get-Content $log -ErrorAction SilentlyContinue
+          Write-Host "=== fake cube received ==="
+          Get-Content $rx -ErrorAction SilentlyContinue
+          if (-not (Select-String -Path $log -Pattern 'entering message loop' -Quiet)) { throw 'app never reached its message loop' }
+          if (-not ((Get-Content $rx) -match '^citoken:[GR]$')) { throw 'app never sent the cube a command' }
+          $run = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name MeetMaster -ErrorAction SilentlyContinue
+          if (-not $run) { throw 'auto-start registry entry missing' }
+          Write-Host "auto-start: $($run.MeetMaster)"
+          $proc = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*meetmaster_tray*' }
+          if (-not $proc) { throw 'pythonw process not running' }
+          Write-Host "process: $($proc.ProcessId)"
+
+      - name: Assert the upgrade quit-broadcast is honored
+        shell: pwsh
+        run: |
+          python tests/broadcast_quit.py
+          $deadline = (Get-Date).AddSeconds(12)
+          do {
+            Start-Sleep 1
+            $p = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" | Where-Object { $_.CommandLine -like '*meetmaster_tray*' }
+          } while ($p -and (Get-Date) -lt $deadline)
+          if ($p) { throw 'app ignored the quit broadcast' }
+          Write-Host "app exited cleanly on broadcast"
+          Get-Content "$env:APPDATA\MeetMaster\meetmaster.log" | Select-Object -Last 6
+
+      - name: Run the real uninstaller and assert cleanup
+        shell: cmd
+        env:
+          MEETMASTER_CI: '1'
+        run: call "stage\MeetMaster\Uninstall MeetMaster.bat"
+
+      - name: Assert uninstall left nothing
+        shell: pwsh
+        run: |
+          $run = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name MeetMaster -ErrorAction SilentlyContinue
+          if ($run) { throw 'auto-start entry survived uninstall' }
+          if (Test-Path "$env:LOCALAPPDATA\Programs\MeetMaster") { throw 'install dir survived uninstall' }
+          Write-Host "uninstall clean"
+
+      - name: Upload the tested bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeetMaster-portable
+          path: dist/MeetMaster-portable.zip
+          if-no-files-found: error

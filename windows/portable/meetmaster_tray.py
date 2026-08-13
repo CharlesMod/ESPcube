@@ -114,6 +114,7 @@ MF_STRING, MF_SEPARATOR = 0x0000, 0x0800
 MF_GRAYED, MF_CHECKED = 0x0001, 0x0008
 TPM_RIGHTBUTTON, TPM_RETURNCMD, TPM_NONOTIFY = 0x0002, 0x0100, 0x0080
 IMAGE_ICON, LR_LOADFROMFILE = 1, 0x0010
+HWND_BROADCAST = 0xFFFF
 
 ID_STATUS, ID_AUTOSTART, ID_SETTINGS, ID_REDISCOVER, ID_EXIT = 1, 2, 3, 4, 5
 
@@ -237,22 +238,24 @@ def send(cmd):
 
 
 def watcher():
+    # The whole body is guarded: this thread must survive anything — a
+    # watcher that dies silently means the cube lies about the mic.
     last = None
     while not stop_event.is_set():
         try:
             now = mic_in_use()
+            if now != last:
+                state["on_call"] = now
+                send("R" if now else "G")
+                user32.PostMessageW(hwnd, WM_APP_STATE, 0, 0)
+                last = now
+            wait_for_mic_change()
+            time.sleep(0.5)
         except Exception as e:
-            state["error"] = f"mic detect: {e}"
+            state["error"] = f"watcher: {e}"
+            log_exception("watcher")
             user32.PostMessageW(hwnd, WM_APP_STATE, 0, 0)
             time.sleep(5)
-            continue
-        if now != last:
-            state["on_call"] = now
-            send("R" if now else "G")
-            user32.PostMessageW(hwnd, WM_APP_STATE, 0, 0)
-            last = now
-        wait_for_mic_change()
-        time.sleep(0.5)
 
 
 # ---------------------------------------------------------------- tray icon
@@ -285,8 +288,34 @@ def status_text():
 def tray_update(add=False):
     nid.hIcon = current_icon()
     nid.szTip = status_text()[:127]
-    shell32.Shell_NotifyIconW(NIM_ADD if add else NIM_MODIFY,
-                              ctypes.byref(nid))
+    op = NIM_ADD if add else NIM_MODIFY
+    ok = shell32.Shell_NotifyIconW(op, ctypes.byref(nid))
+    if not ok and not add:
+        # Self-heal: MODIFY fails if our icon isn't registered (taskbar came
+        # up after we started, or explorer restarted without the message
+        # reaching us yet) — fall back to ADD.
+        ok = shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+    if not ok:
+        log(f"Shell_NotifyIcon failed (op={op}): {ctypes.get_last_error()}")
+
+
+def tray_add_initial():
+    """First NIM_ADD, with a couple of retries.
+
+    At logon we can start before the taskbar exists, in which case NIM_ADD
+    fails; the TaskbarCreated broadcast re-adds us later regardless, so
+    failing here is degraded UX, never fatal — the watcher runs either way.
+    """
+    for attempt in (1, 2, 3):
+        nid.hIcon = current_icon()
+        nid.szTip = status_text()[:127]
+        if shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
+            log("tray icon added")
+            return True
+        log(f"NIM_ADD attempt {attempt} failed: {ctypes.get_last_error()}")
+        time.sleep(2)
+    log("tray icon not added yet; waiting on TaskbarCreated (watcher runs)")
+    return False
 
 
 def show_menu():
@@ -307,6 +336,9 @@ def show_menu():
     cmd = user32.TrackPopupMenu(
         menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
         pt.x, pt.y, 0, hwnd, None)
+    # WM_NULL after TrackPopupMenu: second half of the documented KB135788
+    # workaround — without it the next menu open can flash and self-dismiss.
+    user32.PostMessageW(hwnd, 0, 0, 0)
     user32.DestroyMenu(menu)
 
     if cmd == ID_AUTOSTART:
@@ -329,6 +361,9 @@ def show_menu():
 
 
 taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+# A newer instance broadcasts this to ask an older one to exit, so the
+# installer can upgrade over a running copy without taskkill heroics.
+quit_broadcast = user32.RegisterWindowMessageW("MeetMasterQuitBroadcast")
 
 
 @WNDPROC
@@ -352,6 +387,10 @@ def _wnd_proc(h, msg, wparam, lparam):
         return 0
     if msg == taskbar_created:
         tray_update(add=True)  # explorer restarted; re-add our icon
+        return 0
+    if msg == quit_broadcast:
+        log("quit broadcast received; exiting (upgrade or uninstall)")
+        user32.DestroyWindow(h)
         return 0
     if msg == WM_DESTROY:
         stop_event.set()
@@ -377,10 +416,15 @@ def main():
         subprocess.Popen(["notepad.exe", str(SETTINGS_PATH)])
         return
 
-    # One instance is plenty.
-    kernel32.CreateMutexW(None, False, f"{APP_NAME}-single-instance")
+    # One instance is plenty — but never refuse to start: a wedged older
+    # instance (e.g. one that failed before creating its window) can't
+    # receive the quit broadcast, and exiting here would leave the user
+    # with nothing. Ask politely, wait, then take over.
+    kernel32.CreateMutexW(None, False, f"{APP_NAME}-v2-single-instance")
     if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        return
+        log("another instance detected; broadcasting quit and taking over")
+        user32.PostMessageW(HWND_BROADCAST, quit_broadcast, 0, 0)
+        time.sleep(2.5)
 
     wc = WNDCLASSW()
     wc.lpfnWndProc = wnd_proc
@@ -404,10 +448,8 @@ def main():
     nid.uID = 1
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
     nid.uCallbackMessage = WM_APP_TRAY
-    if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
-        log(f"Shell_NotifyIconW(NIM_ADD) failed: {ctypes.get_last_error()}")
-    tray_update()
-    log("tray icon added; entering message loop")
+    tray_add_initial()
+    log("entering message loop")
 
     threading.Thread(target=watcher, daemon=True).start()
 

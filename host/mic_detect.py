@@ -26,6 +26,7 @@ import sys
 # --------------------------------------------------------------------------
 if sys.platform == "win32":
     import ctypes
+    import time
     import winreg
 
     # Each app that uses the mic gets a subkey here; LastUsedTimeStop == 0
@@ -63,11 +64,16 @@ if sys.platform == "win32":
 
     def wait_for_mic_change():
         # Blocks in the kernel until anything under the consent key changes.
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _MIC_KEY) as k:
-            _advapi32.RegNotifyChangeKeyValue(
-                k.handle, True,
-                _REG_NOTIFY_CHANGE_NAME | _REG_NOTIFY_CHANGE_LAST_SET,
-                None, False)
+        # If the key is unavailable (unusual SKU, policy), degrade to slow
+        # polling instead of letting the watcher thread die.
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _MIC_KEY) as k:
+                _advapi32.RegNotifyChangeKeyValue(
+                    k.handle, True,
+                    _REG_NOTIFY_CHANGE_NAME | _REG_NOTIFY_CHANGE_LAST_SET,
+                    None, False)
+        except OSError:
+            time.sleep(5)
 
 # --------------------------------------------------------------------------
 # macOS
