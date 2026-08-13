@@ -145,6 +145,26 @@ antivirus engines also flag single-file PyInstaller builds on sight, which
 is a known false positive for the packer rather than anything about this
 program.
 
+### Locked-down work laptop? Use the portable bundle
+
+Corporate endpoint policy (AppLocker and friends) often refuses to run an
+unsigned packed exe at all. `MeetMaster-portable.zip` (also on the
+[release](https://github.com/CharlesMod/ESPcube/releases/latest)) sidesteps
+the whole class of problem: it's the **official embeddable Python runtime**
+— whose `python.exe` is signed by the Python Software Foundation — plus the
+stdlib-only watcher, driven by plain batch files. No PyInstaller, no pip,
+no admin anywhere.
+
+Unzip it (on the USB stick is fine) and double-click
+**`Install MeetMaster.bat`**: it copies itself to
+`%LOCALAPPDATA%\Programs\MeetMaster`, asks once for the token, registers
+per-user auto-start (HKCU, no elevation), and starts the same tray app —
+green/red/grey status icon, right-click menu with the checkable *Start
+with Windows*, *Open settings file*, *Find cube again*, and *Exit*. The
+tray icon here is raw Win32 via ctypes, so nothing needs to be installed
+for it. If the machine already has Python, the scripts use that
+automatically and the bundled runtime isn't even required.
+
 To uninstall: Exit from the tray menu, untick Start with Windows first (or
 delete the `MeetMaster` value under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), then delete
