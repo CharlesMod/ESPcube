@@ -15,6 +15,11 @@ wandering into frame.
 The cube itself is any cheap RGB/WRGB LED lamp that ships with a 24-key NEC
 IR remote — the ESP8266 simply impersonates the remote.
 
+**On Windows, grab
+[MeetMaster.exe](https://github.com/CharlesMod/ESPcube/releases/latest)**
+and double-click it. Everything else below is for building the cube or
+running the watcher on macOS/Linux.
+
 ## Features
 
 - **Event-driven mic detection on all three desktop OSes** — no screen
@@ -27,15 +32,21 @@ IR remote — the ESP8266 simply impersonates the remote.
   | macOS   | CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere` on the default input device | `AudioObjectAddPropertyListener` |
   | Linux   | PulseAudio/PipeWire recording streams (`pactl list source-outputs`, monitor sources excluded) | `pactl subscribe` |
 
+- **Zero configuration** — no IP addresses anywhere. The cube answers a UDP
+  broadcast and advertises `espcube.local`; the host rediscovers it
+  mid-run when DHCP moves it.
+- **Day/night dimming** — full brightness by day, dimmer after dark,
+  gliding over ~15 minutes at sunrise and sunset. Sun times are computed
+  on-device from lat/lon, so no weather API is involved.
 - **OTA updates** — after the first USB flash, reflash over WiFi forever.
 - **Authenticated commands** — the cube ignores WebSocket messages without
   the shared token, so nobody else on your LAN can turn your office red.
-- **Brightness ramping** — these controllers have no absolute-brightness
-  code, so the firmware re-sends `BRIGHT_UP` after every color change.
-- **`/info` diagnostics endpoint** — flash geometry, sketch size, core
-  version. Check this first when OTA misbehaves.
+- **Control panel served by the cube** — browse to it from any phone or
+  laptop; no token is baked into the image.
+- **`/info` diagnostics endpoint** — flash geometry, clock, sun times, and
+  day/night state. Check this first when OTA misbehaves.
 - **`ircube.py` bench tool** — dependency-free REPL for firing individual
-  IR codes and sweeping brightness while you watch the cube.
+  IR codes, sweeping brightness, and scanning the NEC command space.
 
 ## Hardware
 
@@ -151,30 +162,37 @@ pyinstaller --onefile --windowed --name MeetMaster --paths host \
     windows/meetmaster.py
 ```
 
-## Host setup
+## Host setup (macOS / Linux, or Windows from source)
 
 ```bash
 cd host
-pip install -r requirements.txt   # websocket-client, pystray, pillow
-cp config.example.py config.py    # set cube IP + the token from secrets.h
-python ESPcube.py                 # tray app
+cp config.example.py config.py    # set TOKEN; leave CUBE_URL = None
+python3 ESPcubeEXE.py             # console watcher — no dependencies at all
 ```
 
-`ESPcubeEXE.py` is the same watcher without the tray icon — handy for
-verifying detection on a new machine (join a test call, watch for
-`call started`) and as a PyInstaller target
-(`pyinstaller --onefile ESPcubeEXE.py`).
+`ESPcubeEXE.py` is **pure standard library**: detection, discovery, and the
+WebSocket frame are all hand-rolled, so it runs on a locked-down machine
+with no pip install and no admin rights. It's also the quickest way to
+verify a new box — join a test call and watch for `call started`.
+
+The tray version needs two packages:
+
+```bash
+pip install -r requirements.txt   # pystray, pillow
+python3 ESPcube.py
+```
 
 Per-OS notes:
 
-- **Windows**: works out of the box.
+- **Windows**: use [MeetMaster](#meetmaster-windows) instead — it packages
+  all of this with auto-start and a tray menu.
 - **macOS**: no extra dependencies (CoreAudio via ctypes).
 - **Linux**: needs `pactl` (present on any PulseAudio or PipeWire desktop).
   The tray icon wants an AppIndicator/ayatana host; on GNOME that's the
   AppIndicator extension, or just run the headless variant.
 
-Start it with your session: Task Scheduler (Windows), a Login Item or
-launchd agent (macOS), or a systemd user service / autostart entry (Linux).
+To start it with your session: a Login Item or launchd agent (macOS), or a
+systemd user service / autostart entry (Linux).
 
 ## Controller app
 
