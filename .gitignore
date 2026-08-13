@@ -1,0 +1,12 @@
+# Secrets — never commit these
+firmware/ESPcube/secrets.h
+host/config.py
+
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+build/
+dist/
+*.spec
