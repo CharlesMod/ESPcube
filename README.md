@@ -99,6 +99,58 @@ one corrected USB flash to escape.
 The cube strobes while connecting to WiFi, flashes white on success, and
 strobes again during an OTA update.
 
+## MeetMaster (Windows)
+
+A single self-installing tray app, for the machine you actually take calls
+on. Download `MeetMaster.exe` from the
+[latest build](https://github.com/CharlesMod/ESPcube/actions/workflows/build-windows.yml)
+(Artifacts section) and double-click it.
+
+On first run it:
+
+1. copies itself to `%LOCALAPPDATA%\Programs\MeetMaster\` — so it keeps
+   working after you pull the USB stick out
+2. registers auto-start for your user (`HKCU\...\CurrentVersion\Run`)
+3. asks once for the cube's token
+4. drops into the system tray and starts watching
+
+**Right-click the tray icon** for:
+
+| Item | Does |
+|---|---|
+| *(status line)* | shows free / on a call, and which cube it found |
+| Start with Windows | checkable — toggles auto-start on the spot |
+| Set token… | change the shared secret |
+| Find cube again | force rediscovery after a router reboot |
+| Exit | quit |
+
+The icon itself is the status: **green** free, **red** on a call, **grey**
+if the cube can't be reached. It finds the cube by broadcast, so no IP is
+ever typed in.
+
+Windows will warn that the exe is unsigned the first time — *More info →
+Run anyway*. Code signing needs a certificate; there isn't one here. Some
+antivirus engines also flag single-file PyInstaller builds on sight, which
+is a known false positive for the packer rather than anything about this
+program.
+
+To uninstall: Exit from the tray menu, untick Start with Windows first (or
+delete the `MeetMaster` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), then delete
+`%LOCALAPPDATA%\Programs\MeetMaster\` and `%APPDATA%\MeetMaster\`.
+
+### Building it yourself
+
+PyInstaller can't cross-compile, so the exe is built by
+`.github/workflows/build-windows.yml` on a Windows runner. On a Windows box:
+
+```bash
+pip install pyinstaller pystray pillow
+pyinstaller --onefile --windowed --name MeetMaster --paths host \
+    --hidden-import pystray._win32 --icon windows/meetmaster.ico \
+    windows/meetmaster.py
+```
+
 ## Host setup
 
 ```bash

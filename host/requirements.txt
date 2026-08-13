@@ -1,3 +1,4 @@
-websocket-client
-pillow
+# Only the tray app (ESPcube.py) needs these.
+# ESPcubeEXE.py, ircube.py and discover.py are pure stdlib.
 pystray
+pillow
